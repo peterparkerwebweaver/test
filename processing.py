@@ -11,7 +11,6 @@ def get_video_info(video_path):
     frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
     cap.release()
 
     if not np.isfinite(fps) or fps <= 0:
@@ -22,16 +21,13 @@ def get_video_info(video_path):
         "frame_count": frame_count,
         "width": width,
         "height": height,
-        "duration_seconds": (
-            frame_count / fps if fps > 0 else 0.0
-        ),
+        "duration_seconds": frame_count / fps if fps > 0 else 0.0,
     }
 
 
 def open_video_writer(output_path, fps, width, height):
     """Create an MP4 video writer."""
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-
     writer = cv2.VideoWriter(
         output_path,
         fourcc,
@@ -54,20 +50,18 @@ def draw_segmentation_results(
     show_labels=True,
     show_conf=True,
 ):
-    """Draw the current frame's handrail segmentation."""
+    """Draw handrail segmentation and return detection details."""
     detections = []
     height, width = frame.shape[:2]
 
     if result.masks is not None:
-        for index, mask in enumerate(result.masks.data):
+        for mask in result.masks.data:
             mask_array = mask.cpu().numpy().astype(np.float32)
-
             mask_array = cv2.resize(
                 mask_array,
                 (width, height),
                 interpolation=cv2.INTER_NEAREST,
             )
-
             binary_mask = mask_array > 0.5
 
             if show_masks:
@@ -96,16 +90,11 @@ def draw_segmentation_results(
 
             if show_boxes:
                 cv2.rectangle(
-                    frame,
-                    (x1, y1),
-                    (x2, y2),
-                    (255, 180, 0),
-                    2,
+                    frame, (x1, y1), (x2, y2), (255, 180, 0), 2
                 )
 
             if show_labels:
                 label = "HANDRAIL"
-
                 if show_conf:
                     label += f" {confidence:.2f}"
 
@@ -125,11 +114,10 @@ def draw_segmentation_results(
 
 class PersistentRailMask:
     """
-    Preserve detected rail pixels between frames.
+    Preserve the detected rail mask across brief detection gaps.
 
-    When the camera is stationary, a union of successive masks helps
-    retain rail sections that the segmentation model temporarily misses.
-    If no mask is detected, retain the last mask for hold_frames frames.
+    Best suited to stationary CCTV cameras. The mask union can retain
+    newly detected sections but can drift if the camera moves.
     """
 
     def __init__(self, hold_frames=30):
@@ -139,36 +127,27 @@ class PersistentRailMask:
 
     def update(self, result, frame_shape):
         height, width = frame_shape[:2]
-
         current = np.zeros((height, width), dtype=np.uint8)
 
         if result.masks is not None:
             for mask in result.masks.data:
                 mask_array = mask.cpu().numpy().astype(np.float32)
-
                 mask_array = cv2.resize(
                     mask_array,
                     (width, height),
                     interpolation=cv2.INTER_NEAREST,
                 )
-
                 current[mask_array > 0.5] = 255
 
-        detected = bool(np.any(current))
-
-        if detected:
+        if np.any(current):
             if self.mask is None:
                 self.mask = current.copy()
             else:
-                # Retain previously detected rail sections and add
-                # newly detected sections. Best suited to fixed cameras.
                 self.mask = cv2.bitwise_or(self.mask, current)
 
             self.missed_frames = 0
-
         else:
             self.missed_frames += 1
-
             if self.missed_frames > self.hold_frames:
                 self.mask = None
 
@@ -176,16 +155,14 @@ class PersistentRailMask:
 
 
 def draw_persistent_rail(frame, rail_mask):
-    """Draw the stabilized rail mask as a cyan/blue overlay."""
+    """Draw the stabilized handrail mask."""
     if rail_mask is None or not np.any(rail_mask):
         return frame
 
     overlay = frame.copy()
     overlay[rail_mask > 0] = (255, 180, 0)
 
-    return cv2.addWeighted(
-        frame, 0.75, overlay, 0.25, 0
-    )
+    return cv2.addWeighted(frame, 0.75, overlay, 0.25, 0)
 
 
 def classify_and_draw_people(
@@ -197,10 +174,8 @@ def classify_and_draw_people(
     show_ids=True,
 ):
     """
-    Classify people using wrist-to-rail distance.
-
-    Green: at least one sufficiently confident wrist is near the rail.
-    Red: neither wrist meets the proximity test.
+    Green: at least one confident wrist is near the rail.
+    Red: neither wrist passes the proximity test.
     """
     using_count = 0
     violation_count = 0
@@ -212,18 +187,13 @@ def classify_and_draw_people(
     keypoints = pose_result.keypoints
 
     track_ids = None
-
     if pose_result.boxes.id is not None:
         track_ids = pose_result.boxes.id.cpu().numpy().astype(int)
 
     distance_map = None
-
     if rail_mask is not None and np.any(rail_mask):
-        # Distance to the nearest pixel belonging to the rail mask.
-        background = (rail_mask == 0).astype(np.uint8)
-
         distance_map = cv2.distanceTransform(
-            background,
+            (rail_mask == 0).astype(np.uint8),
             cv2.DIST_L2,
             3,
         )
@@ -236,14 +206,12 @@ def classify_and_draw_people(
             points = keypoints.xy[index].cpu().numpy()
 
             point_confidences = None
-
             if keypoints.conf is not None:
                 point_confidences = (
                     keypoints.conf[index].cpu().numpy()
                 )
 
-            # Standard COCO pose indices:
-            # 9 = left wrist, 10 = right wrist.
+            # COCO keypoint indices: 9 = left wrist, 10 = right wrist.
             for wrist_index in (9, 10):
                 if wrist_index >= len(points):
                     continue
@@ -252,10 +220,7 @@ def classify_and_draw_people(
                 wx, wy = int(wx), int(wy)
 
                 if point_confidences is not None:
-                    if (
-                        point_confidences[wrist_index]
-                        < wrist_confidence
-                    ):
+                    if point_confidences[wrist_index] < wrist_confidence:
                         continue
 
                 if not (
@@ -280,14 +245,7 @@ def classify_and_draw_people(
         if show_ids and track_ids is not None:
             label = f"ID {track_ids[index]} | {label}"
 
-        cv2.rectangle(
-            frame,
-            (x1, y1),
-            (x2, y2),
-            color,
-            2,
-        )
-
+        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
         cv2.putText(
             frame,
             label,
